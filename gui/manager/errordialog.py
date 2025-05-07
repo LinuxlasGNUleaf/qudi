@@ -143,8 +143,8 @@ class ErrorDialog(QtWidgets.QDialog):
             self.open()
             if w is not None:
                 cp = w.geometry().center()
-                self.setGeometry(cp.x() - self.width() / 2., cp.y() -
-                                 self.height() / 2., self.width(),
+                self.setGeometry(int(cp.x() - self.width() / 2.), int(cp.y() -
+                                 self.height() / 2.), self.width(),
                                  self.height())
         # self.activateWindow()
         self.raise_()

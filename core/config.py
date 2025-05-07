@@ -128,7 +128,7 @@ def ordered_load(stream, Loader=yaml.Loader):
             construct_str)
 
     # load config file
-    config = yaml.load(stream, OrderedLoader)
+    config = yaml.YAML(typ='rt').load(stream)
     # yaml returns None if the config file was empty
     if config is not None:
         return config
@@ -224,7 +224,7 @@ def ordered_dump(data, stream=None, Dumper=yaml.Dumper, **kwds):
     OrderedDumper.add_representer(frozenset, represent_frozenset)
 
     # dump data
-    return yaml.dump(data, stream, OrderedDumper, **kwds)
+    return yaml.YAML(typ='rt').dump(data, stream, **kwds)
 
 
 def load(filename):
@@ -247,4 +247,4 @@ def save(filename, data):
     @param OrderedDict data: config values
     """
     with open(filename, 'w') as f:
-        ordered_dump(data, stream=f, Dumper=yaml.SafeDumper, default_flow_style=False)
+        ordered_dump(data, stream=f, Dumper=yaml.SafeDumper)
