@@ -20,18 +20,19 @@ top-level directory of this distribution and at <https://github.com/Ulm-IQO/qudi
 """
 
 import os
+import time
+
 import pyqtgraph as pg
 import numpy as np
+from PyQt5.QtCore import Qt, QObject
 
 from core.connector import Connector
 from core.util import units
 from gui.colordefs import QudiPalettePale as palette
 from gui.guibase import GUIBase
-from gui.fitsettings import FitSettingsDialog, FitSettingsComboBox
 from qtpy import QtCore
 from qtpy import QtWidgets
 from qtpy import uic
-
 
 class SpectrometerWindow(QtWidgets.QMainWindow):
 
@@ -47,6 +48,26 @@ class SpectrometerWindow(QtWidgets.QMainWindow):
         uic.loadUi(ui_file, self)
         self.show()
 
+class ProgressRunner(QObject):
+    def __init__(self, mw):
+        self._mw = mw
+        super().__init__()
+
+    def run_progress_bar(self, total_time: float):
+        assert 0 < total_time
+        if total_time < 2:
+            steps = 5
+            step_time = total_time / 5
+        else:
+            steps = 20
+            step_time = total_time / 20
+
+        for i in range(steps):
+            self._mw.ProgressBar.setValue(i)
+            self._mw.update()
+            self._mw.show()
+            time.sleep(step_time)
+
 
 class SpectrometerGui(GUIBase):
     """
@@ -57,6 +78,11 @@ class SpectrometerGui(GUIBase):
 
     def __init__(self, config, **kwargs):
         super().__init__(config=config, **kwargs)
+        self._spectrum_logic = None
+        self._progress_runner = None
+        self._progress_thread = None
+        self._pw = None
+        self._mw = None
 
     def on_activate(self):
         """ Definition and initialisation of the GUI.
@@ -67,85 +93,47 @@ class SpectrometerGui(GUIBase):
         # setting up the window
         self._mw = SpectrometerWindow()
 
-        self._mw.stop_diff_spec_Action.setEnabled(False)
-        self._mw.resume_diff_spec_Action.setEnabled(False)
-        self._mw.correct_background_Action.setChecked(self._spectrum_logic.background_correction)
-
-        # giving the plots names allows us to link their axes together
-        self._pw = self._mw.plotWidget  # pg.PlotWidget(name='Counter1')
-        self._plot_item = self._pw.plotItem
-
-        # create a new ViewBox, link the right axis to its coordinate system
-        self._right_axis = pg.ViewBox()
-        self._plot_item.showAxis('right')
-        self._plot_item.scene().addItem(self._right_axis)
-        self._plot_item.getAxis('right').linkToView(self._right_axis)
-        self._right_axis.setXLink(self._plot_item)
-
-        # create a new ViewBox, link the right axis to its coordinate system
-        self._top_axis = pg.ViewBox()
-        self._plot_item.showAxis('top')
-        self._plot_item.scene().addItem(self._top_axis)
-        self._plot_item.getAxis('top').linkToView(self._top_axis)
-        self._top_axis.setYLink(self._plot_item)
-        self._top_axis.invertX(b=True)
-
-        # handle resizing of any of the elements
-
+        # set up axes of spectrum window
+        self._pw = self._mw.spectrumWidget
         self._pw.setLabel('left', 'Fluorescence', units='counts/s')
-        self._pw.setLabel('right', 'Number of Points', units='#')
         self._pw.setLabel('bottom', 'Wavelength', units='m')
-        self._pw.setLabel('top', 'Relative Frequency', units='Hz')
 
-        # Create an empty plot curve to be filled later, set its pen
-        self._curve1 = self._pw.plot()
-        self._curve1.setPen(palette.c1, width=2)
-
-        self._curve2 = self._pw.plot()
-        self._curve2.setPen(palette.c2, width=2)
-
+        self._mw.GratingComboBox.clear()
+        self._mw.GratingComboBox.addItems(self._spectrum_logic.gratings.keys())
         self.update_data()
 
-        # Connect singals
-        self._mw.rec_single_spectrum_Action.triggered.connect(self.record_single_spectrum)
-        self._mw.start_diff_spec_Action.triggered.connect(self.start_differential_measurement)
-        self._mw.stop_diff_spec_Action.triggered.connect(self.stop_differential_measurement)
-        self._mw.resume_diff_spec_Action.triggered.connect(self.resume_differential_measurement)
+        # Progress Runner setup
+        self._progress_thread = QtCore.QThread()
+        self._progress_runner = ProgressRunner(self._mw)
+        self._progress_signal = QtCore.Signal(float)
 
-        self._mw.save_spectrum_Action.triggered.connect(self.save_spectrum_data)
-        self._mw.correct_background_Action.triggered.connect(self.correct_background)
-        self._mw.acquire_background_Action.triggered.connect(self.acquire_background)
-        self._mw.save_background_Action.triggered.connect(self.save_background_data)
 
-        self._mw.restore_default_view_Action.triggered.connect(self.restore_default_view)
-
-        self._spectrum_logic.sig_specdata_updated.connect(self.update_data)
-        self._spectrum_logic.spectrum_fit_updated_Signal.connect(self.update_fit)
-        self._spectrum_logic.fit_domain_updated_Signal.connect(self.update_fit_domain)
+        # ===> CONNECTING SIGNALS
+        self._mw.GratingMoveButton.clicked.connect(self.change_grating)
 
         self._mw.show()
 
-        self._save_PNG = True
+        # self._save_PNG = True
 
-        # Internal user input changed signals
-        self._mw.fit_domain_min_doubleSpinBox.valueChanged.connect(self.set_fit_domain)
-        self._mw.fit_domain_max_doubleSpinBox.valueChanged.connect(self.set_fit_domain)
-
-        # Internal trigger signals
-        self._mw.do_fit_PushButton.clicked.connect(self.do_fit)
-        self._mw.fit_domain_all_data_pushButton.clicked.connect(self.reset_fit_domain_all_data)
-
-        # fit settings
-        self._fsd = FitSettingsDialog(self._spectrum_logic.fc)
-        self._fsd.sigFitsUpdated.connect(self._mw.fit_methods_ComboBox.setFitFunctions)
-        self._fsd.applySettings()
-        self._mw.action_FitSettings.triggered.connect(self._fsd.show)
+        # # Internal user input changed signals
+        # self._mw.fit_domain_min_doubleSpinBox.valueChanged.connect(self.set_fit_domain)
+        # self._mw.fit_domain_max_doubleSpinBox.valueChanged.connect(self.set_fit_domain)
+        #
+        # # Internal trigger signals
+        # self._mw.do_fit_PushButton.clicked.connect(self.do_fit)
+        # self._mw.fit_domain_all_data_pushButton.clicked.connect(self.reset_fit_domain_all_data)
+        #
+        # # fit settings
+        # self._fsd = FitSettingsDialog(self._spectrum_logic.fc)
+        # self._fsd.sigFitsUpdated.connect(self._mw.fit_methods_ComboBox.setFitFunctions)
+        # self._fsd.applySettings()
+        # self._mw.action_FitSettings.triggered.connect(self._fsd.show)
 
     def on_deactivate(self):
         """ Deinitialisation performed during deactivation of the module.
         """
         # disconnect signals
-        self._fsd.sigFitsUpdated.disconnect()
+        # self._fsd.sigFitsUpdated.disconnect()
 
         self._mw.close()
 
@@ -156,123 +144,23 @@ class SpectrometerGui(GUIBase):
         self._mw.activateWindow()
         self._mw.raise_()
 
+    def change_grating(self,):
+        self._progress_runner.moveToThread(self._progress_thread)
+        self._progress_signal.connect(self._progress_runner.run_progress_bar)
+        self._progress_thread.start()
+
     def update_data(self):
         """ The function that grabs the data and sends it to the plot.
         """
-        data = self._spectrum_logic.spectrum_data
-
-        # erase previous fit line
-        self._curve2.setData(x=[], y=[])
-        
-        # draw new data
-        self._curve1.setData(x=data[0, :], y=data[1, :])
-
-    def update_fit(self, fit_data, result_str_dict, current_fit):
-        """ Update the drawn fit curve and displayed fit results.
-        """
-        if current_fit != 'No Fit':
-            # display results as formatted text
-            self._mw.spectrum_fit_results_DisplayWidget.clear()
-            try:
-                formated_results = units.create_formatted_output(result_str_dict)
-            except:
-                formated_results = 'this fit does not return formatted results'
-            self._mw.spectrum_fit_results_DisplayWidget.setPlainText(formated_results)
-
-            # redraw the fit curve in the GUI plot.
-            self._curve2.setData(x=fit_data[0, :], y=fit_data[1, :])
+        data = self._spectrum_logic._spectrum_data
+        #
+        # # erase previous fit line
+        # self._curve2.setData(x=[], y=[])
+        #
+        # # draw new data
+        # self._curve1.setData(x=data[0, :], y=data[1, :])
 
     def record_single_spectrum(self):
         """ Handle resume of the scanning without resetting the data.
         """
         self._spectrum_logic.get_single_spectrum()
-
-    def start_differential_measurement(self):
-
-        # Change enabling of GUI actions
-        self._mw.stop_diff_spec_Action.setEnabled(True)
-        self._mw.start_diff_spec_Action.setEnabled(False)
-        self._mw.rec_single_spectrum_Action.setEnabled(False)
-        self._mw.resume_diff_spec_Action.setEnabled(False)
-
-        self._spectrum_logic.start_differential_spectrum()
-
-    def stop_differential_measurement(self):
-        self._spectrum_logic.stop_differential_spectrum()
-
-        # Change enabling of GUI actions
-        self._mw.stop_diff_spec_Action.setEnabled(False)
-        self._mw.start_diff_spec_Action.setEnabled(True)
-        self._mw.rec_single_spectrum_Action.setEnabled(True)
-        self._mw.resume_diff_spec_Action.setEnabled(True)
-
-    def resume_differential_measurement(self):
-        self._spectrum_logic.resume_differential_spectrum()
-
-        # Change enabling of GUI actions
-        self._mw.stop_diff_spec_Action.setEnabled(True)
-        self._mw.start_diff_spec_Action.setEnabled(False)
-        self._mw.rec_single_spectrum_Action.setEnabled(False)
-        self._mw.resume_diff_spec_Action.setEnabled(False)
-
-    def save_spectrum_data(self):
-        self._spectrum_logic.save_spectrum_data()
-
-    def correct_background(self):
-        self._spectrum_logic.background_correction = self._mw.correct_background_Action.isChecked()
-
-    def acquire_background(self):
-        self._spectrum_logic.get_single_spectrum(background=True)
-
-    def save_background_data(self):
-        self._spectrum_logic.save_spectrum_data(background=True)
-
-    def do_fit(self):
-        """ Command spectrum logic to do the fit with the chosen fit function.
-        """
-        fit_function = self._mw.fit_methods_ComboBox.getCurrentFit()[0]
-        self._spectrum_logic.do_fit(fit_function)
-
-    def set_fit_domain(self):
-        """ Set the fit domain in the spectrum logic to values given by the GUI spinboxes.
-        """
-        lambda_min = self._mw.fit_domain_min_doubleSpinBox.value()
-        lambda_max = self._mw.fit_domain_max_doubleSpinBox.value()
-
-        new_fit_domain = np.array([lambda_min, lambda_max])
-
-        self._spectrum_logic.set_fit_domain(new_fit_domain)
-
-    def reset_fit_domain_all_data(self):
-        """ Reset the fit domain to match the full data set.
-        """
-        self._spectrum_logic.set_fit_domain()
-
-    def update_fit_domain(self, domain):
-        """ Update the displayed fit domain to new values (set elsewhere).
-        """
-        self._mw.fit_domain_min_doubleSpinBox.setValue(domain[0])
-        self._mw.fit_domain_max_doubleSpinBox.setValue(domain[1])
-
-    def restore_default_view(self):
-        """ Restore the arrangement of DockWidgets to the default
-        """
-        # Show any hidden dock widgets
-        self._mw.spectrum_fit_dockWidget.show()
-
-        # re-dock any floating dock widgets
-        self._mw.spectrum_fit_dockWidget.setFloating(False)
-
-        # Arrange docks widgets
-        self._mw.addDockWidget(QtCore.Qt.DockWidgetArea(QtCore.Qt.TopDockWidgetArea),
-                               self._mw.spectrum_fit_dockWidget
-                               )
-
-        # Set the toolbar to its initial top area
-        self._mw.addToolBar(QtCore.Qt.TopToolBarArea,
-                            self._mw.measure_ToolBar)
-        self._mw.addToolBar(QtCore.Qt.TopToolBarArea,
-                            self._mw.background_ToolBar)
-        self._mw.addToolBar(QtCore.Qt.TopToolBarArea,
-                            self._mw.differential_ToolBar)
-        return 0
